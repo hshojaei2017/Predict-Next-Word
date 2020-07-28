@@ -1,0 +1,207 @@
+---
+title: "Data Science Capstone Project - Milestone Report"
+author: "Hasan Shojaei"
+date: "12/10/2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir = '~/Documents/data/CapstoneProject/final/en_US')
+knitr::opts_knit$set(cache=TRUE)
+```
+
+## Executive Summary
+
+The main goal of this project is to create a Shiny app in which the user enters a few words and the app predicts and suggests the 3 most likely word to follow. The prediction algorithm will be based on an n-gram model, and will be trained using the SwiftKey Dataset. 
+
+In this milestone report we present our exploratory data analysis of the SwiftKey dataset. This includes tables and plots summarizing the numnber of words and lines in each of the 3 English files (blogs, news, twitter). We also explore the frequencies of words, bigrams and trigrams found in a sample taken form the files (5% of the lines). At the end of the report we will include a section describing our goals for the eventual algorithm and app. 
+
+## Loading Required R Packages
+
+```{r, message=FALSE}
+# load required R packages
+library(tm)
+library(dplyr)
+library(ggplot2)
+library(gridExtra)
+library(knitr)
+```
+
+## Files Summary
+
+```{r file_stat, echo=TRUE, fig.align='center'}
+
+# set options
+options(stringsAsFactors = FALSE)
+
+# get list of files
+flist <- list.files()
+
+# define a function to extract important info about each file
+file_stat <- function(f) {
+  fsize <- file.info(f)[1]/1024/1024
+  lines <- readLines(f, skipNul = TRUE)
+  nwords <- sum(sapply(strsplit(lines, "\\s+"), length))
+  return(c(f, round(fsize, 2), length(lines), nwords))
+}
+
+# apply the function to all the files 
+stats_list <- lapply(flist, file_stat)
+
+# put the results in a data frame
+df <- data.frame(matrix(unlist(stats_list), nrow=length(stats_list), byrow=T))
+colnames(df) <- c("File", "Size(MB)", "Num_of_Lines", "Num_of_Words")
+
+# show the summary in a neat table
+kable(df, format = "markdown") 
+
+# present the summary as bar charts
+df$Num_of_Lines <- as.numeric(df$Num_of_Lines)
+df$Num_of_Words <- as.numeric(df$Num_of_Words)
+
+g1 <- ggplot(df, aes(x = factor(File), y = Num_of_Lines/1e+06)) +
+  geom_bar(stat = "identity", fill="cornflowerblue") +
+  labs(y = "Number of Lines (million)", x = "", title = "Number of Lines in Each File") +
+  theme(axis.text.x=element_text(angle=45, hjust=1))
+
+g2 <- ggplot(df, aes(x = factor(File), y = Num_of_Words/1e+06)) +
+  geom_bar(stat = "identity", fill="cornflowerblue") +
+  labs(y = "Number of Words (million)", x = "", title = "Number of Words in Each File") +
+  theme(axis.text.x=element_text(angle=45, hjust=1))
+
+grid.arrange(g1, g2, ncol=2)
+```
+
+## Sampling from the Data
+
+To get a sense of the data, we take a small sample from each of the 3 files (5% of the lines) and perform exploratory data analysis on the sample. 
+
+```{r sampling}
+
+# define a function to sample from each files
+file_sample <- function(f) {
+  lines <- readLines(f, skipNul = TRUE)
+  smpl <- sample(lines, round(0.05*length(lines)), replace = FALSE)
+  return(c(f,smpl))
+}
+
+# apply the function to all the files 
+samples_list <- lapply(flist, file_sample)
+
+# create a "Volatile Corpus" by putting together samples from all 3 files
+docs <- VCorpus(VectorSource(samples_list))
+
+# assign ID to each part of the corpus
+for (i in 1:length(docs)) {
+   attr(docs[[i]], "ID") <- samples_list[[i]][1]
+}
+
+```
+
+## Pre-Procesing
+
+We then perform some pre-processing on the data. This includes removing foreign words, URLs, hashtags, usernames, stop words (e.g. `and`, `a`), punctuations, numbers, extra white space, and converting capital letters to lower case.
+
+```{r preprocessing}
+
+# define necessary functions for pre-processing
+removeForeign <- function(x) iconv(x,"latin1","ASCII",sub = "")
+removeURL <- function(x) gsub("http:[[:alnum:]]*", "", x)
+removeHashtag <- function(x) gsub("#\\S+", "", x)
+removeUsername <- function(x) gsub("@\\S+", "", x)
+
+PreProcess <- function(doc){
+  #doc <- tm_map(doc, removeWords, cursewords)
+  doc <- tm_map(doc, removeWords, stopwords("english"))
+  doc <- tm_map(doc, removePunctuation)
+  doc <- tm_map(doc, removeNumbers)
+  doc <- tm_map(doc, stripWhitespace)
+  doc <- tm_map(doc, content_transformer(tolower))
+  doc <- tm_map(doc, content_transformer(removeForeign))
+  doc <- tm_map(doc, content_transformer(removeURL))
+  doc <- tm_map(doc, content_transformer(removeHashtag))
+  doc <- tm_map(doc, content_transformer(removeUsername))
+  #doc <- tm_map(doc, PlainTextDocument)
+  return(doc)
+}
+
+# apply the pre-processing function on the corpus
+docs <- PreProcess(docs)
+
+```
+
+
+## Tokenization
+
+In this section we tokenize the text. In other words we extract unigrams (words), bigrams (groups of two consecutive words) and trigrams (groups of three consecutive words). These n-grams will be used later to build and train a prediction algorithm for our Shiny app. 
+
+```{r tokenization}
+ # define required functions for tokenization
+BigramTokenizer <- function(x) unlist(lapply(ngrams(words(x), 2), paste, collapse = " "), use.names = FALSE)
+TrigramTokenizer <- function(x) unlist(lapply(ngrams(words(x), 3), paste, collapse = " "), use.names = FALSE)
+
+# tokenize the text
+Unigram_tdm <- TermDocumentMatrix(docs)
+Bigram_tdm <- TermDocumentMatrix(docs, control = list(tokenize = BigramTokenizer))
+Trigram_tdm <- TermDocumentMatrix(docs, control = list(tokenize = TrigramTokenizer))
+```
+
+## N-gram Frequencies
+
+In this section we calculate the frequencies of different n-grams, and generate histograms by plotting 20 most frequent n-grams. 
+
+```{r NgramFrequencies, fig.height=10, fig.align='center'}
+
+# number of most frequent n-grams to show
+n <- 20
+
+# find most frequent n-grams
+UnigramFreq <- findFreqTerms(Unigram_tdm, n)
+BigramFreq <- findFreqTerms(Bigram_tdm, n)
+TrigramFreq <- findFreqTerms(Trigram_tdm, n)
+
+# generate sorted data frames
+UnigramFrequencies <- rowSums(as.matrix(Unigram_tdm[UnigramFreq,]))
+UnigramFrequencies <- data.frame(Word=names(UnigramFrequencies),Frequency=UnigramFrequencies)
+UnigramFrequencies <- UnigramFrequencies[order(-UnigramFrequencies$Frequency),]
+
+BigramFrequencies <- rowSums(as.matrix(Bigram_tdm[BigramFreq,]))
+BigramFrequencies <- data.frame(Word=names(BigramFrequencies),Frequency=BigramFrequencies)
+BigramFrequencies <- BigramFrequencies[order(-BigramFrequencies$Frequency),]
+
+TrigramFrequencies <- rowSums(as.matrix(Trigram_tdm[TrigramFreq,]))
+TrigramFrequencies <- data.frame(Word=names(TrigramFrequencies),Frequency=TrigramFrequencies)
+TrigramFrequencies <- TrigramFrequencies[order(-TrigramFrequencies$Frequency),]
+
+# plot the results
+UnigramFrequencies$Word <- as.character(UnigramFrequencies$Word)
+UnigramFrequencies$Word <- factor(UnigramFrequencies$Word, levels = UnigramFrequencies$Word)
+g3 <- ggplot(UnigramFrequencies[1:n,], aes(x = Word, y = Frequency)) + 
+  geom_bar(stat = "identity", fill="green") + 
+  labs(title = "Most Frequent Words", x="")+
+  theme(axis.text.x=element_text(angle=45, hjust=1))
+  
+BigramFrequencies$Word <- as.character(BigramFrequencies$Word)
+BigramFrequencies$Word <- factor(BigramFrequencies$Word, levels = BigramFrequencies$Word)
+g4 <- ggplot(BigramFrequencies[1:n,], aes(x = Word, y = Frequency)) + 
+  geom_bar(stat = "identity", fill="green") + 
+  labs(title = "Most Frequent Bigrams", x="")+
+  theme(axis.text.x=element_text(angle=45, hjust=1))
+
+TrigramFrequencies$Word <- as.character(TrigramFrequencies$Word)
+TrigramFrequencies$Word <- factor(TrigramFrequencies$Word, levels = TrigramFrequencies$Word)
+g5 <- ggplot(TrigramFrequencies[1:n,], aes(x = Word, y = Frequency)) + 
+  geom_bar(stat = "identity", fill="green") + 
+  labs(title = "Most Frequent Trigrams", x="")+
+  theme(axis.text.x=element_text(angle=45, hjust=1))
+  
+grid.arrange(g3, g4, g5, ncol=1)
+
+```
+
+## Next Steps
+
+In the remainder of this project we will build an n-gram model for predicting the next word based on the previous 1, 2, or 3 words. We aim to build a model that handles unseen n-grams becuase a user may enter a combination of words that has not been observed in the corpora before. This will be achieved by smoothing the probabilities (i.e. giving all n-grams a non-zero probability even if they have not been observed in the data). We will also pay special attention to the efficiency of our algorithm which is determined by the size (physical RAM required) and runtime (the amount of time the algorithm takes to make a prediction) of the algorithm. This is very important because our prediction algorithm will need to run in a Shiny app. 
+
+
+
